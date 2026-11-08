@@ -4,6 +4,13 @@
 #pragma once
 #include <stdint.h>
 
+// Your Wi-Fi / MQTT credentials go in src/secrets.h (git-ignored; copy
+// src/secrets.h.example). Anything defined there overrides the defaults below,
+// so this file never needs local edits.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
 // ---------------------------------------------------------------------------
 // Radio selection
 // ---------------------------------------------------------------------------
@@ -93,7 +100,8 @@
 // On-board SSD1306 OLED (LilyGo T3 v1.6.1): always powered, no reset line,
 // so PIN_VEXT and PIN_OLED_RST are intentionally left undefined.
 #define PIN_OLED_SDA  21
-#define PIN_OLED_SCL  22#else
+#define PIN_OLED_SCL  22
+#else
 // On-board SSD1306 OLED (Heltec V3/V4): I2C + Vext power + reset
 #define PIN_OLED_SDA  17
 #define PIN_OLED_SCL  18
@@ -143,19 +151,40 @@
 #define SEND_STATUS_INTERVAL_MS  (60UL*1000UL)         // RQ 31DA every 60s (live status)
 
 // ---------------------------------------------------------------------------
-// Networking (defaults; override at runtime via the web UI / SoftAP portal)
+// Networking (defaults; override in src/secrets.h, or at runtime via the web UI
+// / SoftAP portal)
 // ---------------------------------------------------------------------------
+#ifndef WIFI_SSID
 #define WIFI_SSID        ""            // empty => start SoftAP setup portal
+#endif
+#ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD    ""
+#endif
+#ifndef WIFI_AP_NAME
 #define WIFI_AP_NAME     "Orcon15RF-Setup"
+#endif
+#ifndef WIFI_AP_PASS
 #define WIFI_AP_PASS     "orconsetup"  // >= 8 chars
+#endif
 
+#ifndef MQTT_ENABLED
 #define MQTT_ENABLED     1
+#endif
+#ifndef MQTT_HOST
 #define MQTT_HOST        "192.168.1.10"
+#endif
+#ifndef MQTT_PORT
 #define MQTT_PORT        1883
+#endif
+#ifndef MQTT_USER
 #define MQTT_USER        ""
+#endif
+#ifndef MQTT_PASS
 #define MQTT_PASS        ""
+#endif
+#ifndef MQTT_BASE_TOPIC
 #define MQTT_BASE_TOPIC  "orcon15rf"   // orcon15rf/state, orcon15rf/cmd, ...
+#endif
 
 // ---------------------------------------------------------------------------
 // Debug

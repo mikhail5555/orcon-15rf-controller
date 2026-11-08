@@ -236,10 +236,24 @@ static void learnFan(const ramses::DeviceId& d) {
     }
 }
 
+// A 15RF remote sends 5 copies over ~3 s, gaps up to ~1.7 s.
+static const uint32_t RETRANSMIT_GAP_MS = 2000;
+
+static bool isRetransmission(const ramses::Frame& f) {
+    static ramses::Frame last;
+    static uint32_t lastMs = 0;
+    static bool haveLast = false;
+    uint32_t now = millis();
+    bool repeat = haveLast && (now - lastMs) < RETRANSMIT_GAP_MS && ramses::sameFrame(f, last);
+    last = f; lastMs = now; haveLast = true;
+    return repeat;
+}
+
 bool onFrame(const ramses::Frame& f) {
     rlog::add('R', f, (int)radio::lastRssi());
     g_state.rxCount++;
     fmtFrame(f, g_state.lastRx, sizeof(g_state.lastRx));
+    if (isRetransmission(f)) return false;
 
     bool fromFan = false;
     for (int i = 0; i < 3; i++) {

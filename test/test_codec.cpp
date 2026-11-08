@@ -25,20 +25,6 @@ static Frame makeFan22F1(uint8_t nn) {
     return f;
 }
 
-static bool sameFrame(const Frame& a, const Frame& b) {
-    if (a.type != b.type) return false;
-    if (a.cmd != b.cmd || a.len != b.len) return false;
-    for (int i = 0; i < 3; i++) {
-        if (a.has_addr[i] != b.has_addr[i]) return false;
-        if (a.has_addr[i] && !(a.addr[i] == b.addr[i])) return false;
-    }
-    if (a.has_param0 != b.has_param0 || a.has_param1 != b.has_param1) return false;
-    if (a.has_param0 && a.param0 != b.param0) return false;
-    if (a.has_param1 && a.param1 != b.param1) return false;
-    for (uint8_t i = 0; i < a.len; i++) if (a.payload[i] != b.payload[i]) return false;
-    return true;
-}
-
 static void test_logical_checksum() {
     printf("\n== logical build/parse + checksum ==\n");
     Frame f = makeFan22F1(0x03);   // High
@@ -116,6 +102,68 @@ static void test_onair_misalignment() {
     }
 }
 
+static void test_corrupt_first_sync_byte() {
+    printf("\n== wire stream with a bit error in SYNC[0] ==\n");
+    // Real SX1276 capture of a 15RF remote "low" press, noise included.
+    static const uint8_t capture[] = {
+        0xB3,0xF7,0x7F,0x3F,0xF7,0x17,0xF6,0xFF,0x55,0x55,0x55,0x55,0x55,0x55,
+        0xFD,0x00,0x33,0x55,0x53,
+        0xA9,0x5A,0x95,0x96,0x65,0x5A,0xA5,0x6A,0x6A,0xA6,0xA5,0xA5,0x99,0x5A,
+        0xA6,0xA6,0x55,0xA9,0xAA,0xA5,0xAA,0xAA,0xAA,0xA9,0xAA,0x9A,0x9A,0x56,
+        0x35,0x55,0x7C,0xBE,0xFF,0xDF,0xDE,
+    };
+    Frame g; size_t consumed = 0;
+    bool ok = extractWireFrame(capture, sizeof(capture), &consumed, g);
+    CHECK(ok, "frame with FD instead of FF as first sync byte still decodes");
+    CHECK(ok && g.cmd == 0x22F1 && g.len == 3 && g.payload[1] == 0x01,
+          "decoded payload is 22F1 000104 (remote: low)");
+}
+
+static void test_sync_bit_tolerance() {
+    printf("\n== sync word tolerates up to 2 bit errors ==\n");
+    CHECK(isSync(SYNC), "exact sync matches");
+    for (int k = 0; k < 5; k++) {
+        uint8_t w[5]; memcpy(w, SYNC, 5);
+        w[k] ^= 0x04;
+        char m[64]; snprintf(m, sizeof(m), "1 bit error in sync byte %d matches", k);
+        CHECK(isSync(w), m);
+    }
+    uint8_t two[5]; memcpy(two, SYNC, 5);
+    two[1] ^= 0x01; two[3] ^= 0x80;
+    CHECK(isSync(two), "2 bit errors in different bytes match");
+    uint8_t three[5]; memcpy(three, SYNC, 5);
+    three[0] ^= 0x03; three[4] ^= 0x10;
+    CHECK(!isSync(three), "3 bit errors are rejected");
+    const uint8_t preamble[5] = { 0x55, 0x55, 0x55, 0x55, 0x55 };
+    CHECK(!isSync(preamble), "plain preamble is not mistaken for sync");
+
+    Frame f = makeFan22F1(0x02);
+    uint8_t logical[MAX_LOGICAL];
+    size_t ln = buildLogical(f, logical, sizeof(logical));
+    uint8_t wire[MAX_WIRE];
+    size_t wn = wireFromLogical(logical, ln, wire, sizeof(wire));
+    wire[2] ^= 0x20;
+    Frame g; size_t consumed = 0;
+    CHECK(wn && extractWireFrame(wire, wn, &consumed, g) && sameFrame(f, g),
+          "frame with a bit error in sync byte 2 decodes bit-exact");
+}
+
+static void test_corrupt_stop_keeps_next_frame() {
+    printf("\n== corrupted STOP does not swallow the next frame ==\n");
+    Frame f = makeFan22F1(0x01);
+    uint8_t logical[MAX_LOGICAL];
+    size_t ln = buildLogical(f, logical, sizeof(logical));
+    uint8_t wire[MAX_WIRE];
+    size_t wn = wireFromLogical(logical, ln, wire, sizeof(wire));
+    uint8_t stream[2 * MAX_WIRE];
+    memcpy(stream, wire, wn);
+    stream[wn - 1] ^= 0x01;
+    memcpy(stream + wn, wire, wn);
+    Frame g; size_t consumed = 0;
+    bool ok = extractWireFrame(stream, 2 * wn, &consumed, g);
+    CHECK(ok && sameFrame(f, g) && consumed == 2 * wn, "second copy decodes");
+}
+
 static void test_manchester_table() {
     printf("\n== Manchester table integrity ==\n");
     bool distinct = true;
@@ -142,6 +190,9 @@ int main() {
     test_header_types();
     test_onair_roundtrip();
     test_onair_misalignment();
+    test_corrupt_first_sync_byte();
+    test_sync_bit_tolerance();
+    test_corrupt_stop_keeps_next_frame();
     const char* verdict = failures ? "FAILED" : "ALL PASSED";
     const char* plural  = (failures == 1) ? "" : "s";
     printf("\n%s (%d failure%s)\n", verdict, failures, plural);

@@ -159,6 +159,9 @@ static void buildStateJson(char* out, size_t cap) {
     d["us_id"]     = uid;
     d["fan_id"]    = fid;
     d["rssi"]      = (int)radio::lastRssi();
+    d["rx_backlog_max"] = radio::rxMaxBacklog();
+    d["rx_overflows"]   = radio::rxOverflows();
+    d["rx_bad_frames"]  = ramses::badFrameCount();
     d["radio"]     = radio::name();
     d["online"]    = (millis() - s.lastRxMs) < 600000UL && s.lastRxMs != 0;
     d["cmd_mode"]  = orcon::modeName(s.cmdMode);
@@ -318,7 +321,7 @@ static void handleCmd() {
 
 // GET /api/log -> { log:[...], seen_remote, seen_fan }
 static void handleLog() {
-    static char buf[7168];
+    static char buf[12288];
     size_t n = snprintf(buf, sizeof(buf), "{\"log\":");
     n += rlog::toJson(buf + n, sizeof(buf) - n);
     const rlog::Seen& s = rlog::seen();

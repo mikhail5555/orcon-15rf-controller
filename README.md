@@ -111,6 +111,8 @@ Defined in `platformio.ini`:
 ## Build & flash
 
 1. Install [PlatformIO](https://platformio.org/) (`pip install platformio`).
+   Optionally copy `src/secrets.h.example` to `src/secrets.h` (git-ignored) and
+   put your Wi-Fi / MQTT credentials there — never edit them into `config.h`.
 2. First flash over USB (later updates go over Wi-Fi / OTA):
    ```bash
    pio run -e heltec_v3_cc1101_ota -t upload --upload-port COM5
