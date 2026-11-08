@@ -31,6 +31,10 @@ bool poll(ramses::Frame& out);
 // Last measured RSSI (dBm) of a received packet, for diagnostics.
 float lastRssi();
 
+// RX diagnostics, SX1276 back-end only.
+uint32_t rxMaxBacklog();
+uint32_t rxOverflows();
+
 // Human-readable back-end name ("SX1262" / "CC1101").
 const char* name();
 

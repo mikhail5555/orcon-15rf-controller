@@ -4,6 +4,13 @@
 #pragma once
 #include <stdint.h>
 
+// Your Wi-Fi / MQTT credentials go in src/secrets.h (git-ignored; copy
+// src/secrets.h.example). Anything defined there overrides the defaults below,
+// so this file never needs local edits.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
 // ---------------------------------------------------------------------------
 // Radio selection
 // ---------------------------------------------------------------------------
@@ -18,7 +25,7 @@
 #define RF_FREQ_MHZ        868.300f
 #define RF_BITRATE_KBPS    38.4f
 #define RF_DEVIATION_KHZ   50.78f
-#if defined(BOARD_HELTEC_V2)
+#if defined(RADIO_SX1276)
 #define RF_RXBW_KHZ        250.0f      // SX1276 max RxBw — wide enough for RAMSES
 #else
 #define RF_RXBW_KHZ        312.0f      // nearest SX1262-valid step to the protocol's 325k
@@ -40,6 +47,17 @@
 #define PIN_SX_DIO0   26
 #define PIN_SX_DIO1   35
 #define PIN_SX_DIO2   34     // demod data out (continuous mode) -> ESP UART RX (input-only GPIO, fine)
+#elif defined(BOARD_LILYGO_T3_V161)
+// On-board SX1276 (LilyGo T3 LoRa32 v1.6.1, ESP32-PICO-D4). Same radio as the
+// Heltec V2, different RST/DIO1/DIO2 routing.
+#define PIN_SX_NSS    18
+#define PIN_SX_SCK     5
+#define PIN_SX_MOSI   27
+#define PIN_SX_MISO   19
+#define PIN_SX_RST    23
+#define PIN_SX_DIO0   26
+#define PIN_SX_DIO1   33
+#define PIN_SX_DIO2   32     // demod data out (continuous mode) -> ESP UART RX
 #else
 // On-board SX1262 (fixed on the Heltec V3/V4)
 #define PIN_SX_NSS    8
@@ -78,6 +96,11 @@
 #define PIN_OLED_SCL  15
 #define PIN_OLED_RST  16
 #define PIN_VEXT      21      // drive LOW to power the OLED/Vext rail on V2
+#elif defined(BOARD_LILYGO_T3_V161)
+// On-board SSD1306 OLED (LilyGo T3 v1.6.1): always powered, no reset line,
+// so PIN_VEXT and PIN_OLED_RST are intentionally left undefined.
+#define PIN_OLED_SDA  21
+#define PIN_OLED_SCL  22
 #else
 // On-board SSD1306 OLED (Heltec V3/V4): I2C + Vext power + reset
 #define PIN_OLED_SDA  17
@@ -128,19 +151,40 @@
 #define SEND_STATUS_INTERVAL_MS  (60UL*1000UL)         // RQ 31DA every 60s (live status)
 
 // ---------------------------------------------------------------------------
-// Networking (defaults; override at runtime via the web UI / SoftAP portal)
+// Networking (defaults; override in src/secrets.h, or at runtime via the web UI
+// / SoftAP portal)
 // ---------------------------------------------------------------------------
+#ifndef WIFI_SSID
 #define WIFI_SSID        ""            // empty => start SoftAP setup portal
+#endif
+#ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD    ""
+#endif
+#ifndef WIFI_AP_NAME
 #define WIFI_AP_NAME     "Orcon15RF-Setup"
+#endif
+#ifndef WIFI_AP_PASS
 #define WIFI_AP_PASS     "orconsetup"  // >= 8 chars
+#endif
 
+#ifndef MQTT_ENABLED
 #define MQTT_ENABLED     1
+#endif
+#ifndef MQTT_HOST
 #define MQTT_HOST        "192.168.1.10"
+#endif
+#ifndef MQTT_PORT
 #define MQTT_PORT        1883
+#endif
+#ifndef MQTT_USER
 #define MQTT_USER        ""
+#endif
+#ifndef MQTT_PASS
 #define MQTT_PASS        ""
+#endif
+#ifndef MQTT_BASE_TOPIC
 #define MQTT_BASE_TOPIC  "orcon15rf"   // orcon15rf/state, orcon15rf/cmd, ...
+#endif
 
 // ---------------------------------------------------------------------------
 // Debug

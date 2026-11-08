@@ -9,6 +9,16 @@ static int manchIndex(uint8_t wire) {
     return -1;
 }
 
+// Real SX1276 captures show single-bit errors at the preamble/sync handover
+// (e.g. FD 00 33 55 53); Manchester + checksum still reject noise.
+static const int SYNC_MAX_BIT_ERRORS = 2;
+
+bool isSync(const uint8_t* wire) {
+    int errors = 0;
+    for (int k = 0; k < 5; k++) errors += __builtin_popcount(wire[k] ^ SYNC[k]);
+    return errors <= SYNC_MAX_BIT_ERRORS;
+}
+
 uint8_t headerForType(MsgType t, bool a0, bool a1, bool a2, bool p0, bool p1) {
     uint8_t flags = 0;
     switch (t) {
@@ -110,8 +120,7 @@ size_t wireFromLogical(const uint8_t* logical, size_t n, uint8_t* out, size_t ca
 }
 
 size_t logicalFromWire(const uint8_t* wire, size_t n, uint8_t* out, size_t cap) {
-    if (n < 6) return 0;
-    for (int i = 0; i < 5; i++) if (wire[i] != SYNC[i]) return 0;
+    if (n < 6 || !isSync(wire)) return 0;
     size_t i = 5, o = 0;
     while (i + 1 < n) {
         if (wire[i] == STOP_WIRE) break;
@@ -228,11 +237,25 @@ bool decodeFrame(const uint8_t* onair, size_t n_bytes, size_t n_bits, Frame& f) 
     return parseLogical(logical, ln, f);
 }
 
+bool sameFrame(const Frame& a, const Frame& b) {
+    if (a.type != b.type || a.cmd != b.cmd || a.len != b.len) return false;
+    for (int i = 0; i < 3; i++) {
+        if (a.has_addr[i] != b.has_addr[i]) return false;
+        if (a.has_addr[i] && !(a.addr[i] == b.addr[i])) return false;
+    }
+    if (a.has_param0 != b.has_param0 || a.has_param1 != b.has_param1) return false;
+    if (a.has_param0 && a.param0 != b.param0) return false;
+    if (a.has_param1 && a.param1 != b.param1) return false;
+    for (uint8_t i = 0; i < a.len; i++) if (a.payload[i] != b.payload[i]) return false;
+    return true;
+}
+
+static uint32_t g_badFrames = 0;
+uint32_t badFrameCount() { return g_badFrames; }
+
 bool extractWireFrame(const uint8_t* s, size_t n, size_t* consumed, Frame& f) {
     for (size_t i = 0; i + 5 <= n; i++) {
-        bool sync = true;
-        for (int k = 0; k < 5; k++) if (s[i + k] != SYNC[k]) { sync = false; break; }
-        if (!sync) continue;
+        if (!isSync(&s[i])) continue;
         // SYNC found at i; need a STOP marker to have a complete frame.
         size_t stop = 0; bool haveStop = false;
         for (size_t j = i + 5; j < n; j++) { if (s[j] == STOP_WIRE) { stop = j; haveStop = true; break; } }
@@ -240,8 +263,9 @@ bool extractWireFrame(const uint8_t* s, size_t n, size_t* consumed, Frame& f) {
         uint8_t logical[MAX_LOGICAL];
         size_t ln = logicalFromWire(&s[i], stop - i + 1, logical, sizeof(logical));
         if (ln && parseLogical(logical, ln, f)) { if (consumed) *consumed = stop + 1; return true; }
-        // bad/garbled frame: drop through this SYNC and keep scanning.
-        i = stop;   // skip to the STOP we found
+        // Keep scanning from i+1, not from stop: a corrupted STOP makes this
+        // frame run into the next one, which must still be found.
+        g_badFrames++;
     }
     // No frame: drop everything but a possible partial SYNC at the tail.
     if (consumed) *consumed = (n >= 4) ? n - 4 : 0;

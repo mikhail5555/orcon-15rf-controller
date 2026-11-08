@@ -139,6 +139,12 @@ input[type=range]{width:100%}label{color:var(--mut);font-size:13px}
 <div class="row"><b>Fan link</b><span id="pairLink">–</span></div>
 <button style="width:100%;margin-top:10px" data-pair>Pair with my Orcon</button>
 <div id="pairMsg" class="small" style="margin-top:8px">Power-cycle your Orcon, then tap Pair within 3 minutes.</div>
+<div class="metrics" style="margin-top:12px">
+<div class="row"><b>This board ID</b><input id="idUs" placeholder="37:012345" style="width:140px;background:#26303c;color:var(--fg);border:1px solid #313d4c;border-radius:8px;padding:6px"></div>
+<div class="row"><b>Fan ID</b><input id="idFan" placeholder="32:178990" style="width:140px;background:#26303c;color:var(--fg);border:1px solid #313d4c;border-radius:8px;padding:6px"></div>
+</div>
+<button id="idSave" style="width:100%;margin-top:10px">Save IDs</button>
+<div id="idMsg" class="small" style="margin-top:6px">Blank keeps the current ID. Only frames involving this fan update the status.</div>
 </div>
 
 <div class="card"><div class="small" style="margin-bottom:8px">Room temperatures (Domoticz IDX)</div>
@@ -215,6 +221,16 @@ document.querySelectorAll('[data-pair]').forEach(b=>b.onclick=()=>{send({pair:1}
 if($('#pl'))$('#pl').onchange=e=>send({plearn:e.target.checked?1:0});
 if($('#maskids'))$('#maskids').onchange=e=>send({maskids:e.target.checked?1:0}).then(()=>setTimeout(refresh,300));
 if($('#showfilter'))$('#showfilter').onchange=e=>send({showfilter:e.target.checked?1:0}).then(()=>setTimeout(refresh,300));
+let curIds={us:'',fan:''};
+$('#idSave').onclick=()=>{
+ const pa=s=>{const m=(s||'').trim().split(':');return m.length===2&&m[0]&&m[1]?[parseInt(m[0],10),parseInt(m[1],10)]:null};
+ const u=pa($('#idUs').value)||pa(curIds.us),f=pa($('#idFan').value)||pa(curIds.fan);
+ if(!u){$('#idMsg').textContent='Enter IDs as cc:serial, e.g. 37:012345';return;}
+ const body={us_class:u[0],us_serial:u[1]};
+ if(f){body.fan_class=f[0];body.fan_serial=f[1];}
+ fetch('/api/ids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(()=>{$('#idUs').value=$('#idFan').value='';$('#idMsg').textContent='Saved.';setTimeout(refresh,300);});
+};
 if($('#riSave'))$('#riSave').onclick=()=>{var a=[];for(var i=0;i<7;i++){var el=$('#ri'+i);a.push(el&&el.value?+el.value:0);}send({roomidx:a}).then(()=>{if($('#riMsg'))$('#riMsg').textContent='Saved.';setTimeout(refresh,400);});};
 document.querySelector('[data-selftest]').onclick=()=>send({selftest:1});
 document.querySelector('[data-connect]').onclick=()=>send({connect:1});
@@ -257,6 +273,9 @@ function refresh(){fetch('/api/state').then(r=>r.json()).then(s=>{
    else if(s.pair==='timeout')pm.innerHTML='<span style="color:var(--warn)">No fan found.</span> Power-cycle the Orcon and tap Pair again.';
    else pm.textContent='Power-cycle your Orcon, then tap Pair within 3 minutes.';
  }
+ curIds={us:s.us_id,fan:s.fan_known?s.fan_id:''};
+ $('#idUs').placeholder=fmtId(s.us_id,s.mask_ids);
+ $('#idFan').placeholder=s.fan_known?fmtId(s.fan_id,s.mask_ids):'not set';
  if($('#pl'))$('#pl').checked=!!s.plearn;
  if($('#maskids'))$('#maskids').checked=!!s.mask_ids;
  if($('#showfilter'))$('#showfilter').checked=!!s.show_filter;
@@ -352,7 +371,7 @@ static const char LOG_HTML[] PROGMEM = R"LOG(<!doctype html>
 <style>
 :root{--bg:#10141a;--card:#1a212b;--fg:#e7edf3;--mut:#8b97a7;--acc:#3da9fc;--rx:#2ecc71;--tx:#f5b041}
 *{box-sizing:border-box}body{margin:0;font:14px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-.wrap{max-width:760px;margin:0 auto;padding:16px}h1{font-size:18px;margin:6px 0 12px}
+.wrap{max-width:1280px;margin:0 auto;padding:16px}h1{font-size:18px;margin:6px 0 12px}
 .card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:14px}
 label{display:block;color:var(--mut);font-size:12px;margin:8px 0 4px}
 input,button{font:inherit;color:var(--fg);background:#26303c;border:1px solid #313d4c;border-radius:9px;padding:9px}
@@ -360,6 +379,7 @@ button{cursor:pointer}button.go{background:var(--acc);border-color:var(--acc);co
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}.small{font-size:12px;color:var(--mut)}
 pre{background:#0c1016;border-radius:10px;padding:10px;overflow:auto;max-height:60vh;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:0}
 .rx{color:var(--rx)}.tx{color:var(--tx)}.tag{display:inline-block;width:14px}
+.mean{color:var(--mut)}
 b{color:var(--fg)}
 </style></head><body><div class="wrap">
 <h1>RF log &amp; device identity</h1>
@@ -389,20 +409,73 @@ Put that as <b>This device ID</b> and your fan as <b>Fan ID</b>, Apply, and the 
 </div>
 <script>
 const $=s=>document.querySelector(s);
-let seenR='',seenF='';
+let seenR='',seenF='',usId='';
 function st(){fetch('/api/state').then(r=>r.json()).then(s=>{
+  usId=s.us_id;
   $('#usid').textContent=s.us_id;$('#fanid').textContent=s.fan_id;
   if(!$('#us').value)$('#us').value=s.us_id;
   if(!$('#fan').value&&s.fan_id&&!s.fan_id.startsWith('63'))$('#fan').value=s.fan_id;
 })}
 function fmtAge(t,now){let a=Math.max(0,(now-t)/1000);return a<99?a.toFixed(0)+'s':(a/60).toFixed(0)+'m'}
+// Human-readable meaning of a logged frame, e.g. "remote → fan: mode medium".
+const DEV={'01':'controller','04':'radiator valve','13':'relay','18':'gateway','29':'remote',
+ '32':'fan','34':'thermostat','37':'15RF controller','63':'broadcast'};
+const MODE=['away','low','medium','high','auto','auto2','boost','disable'];
+// 31DA layout as in ramses_rf; 0xEF / 0x7FFF mean "not available".
+const FAN_INFO=i=>i===0?'off':i<=10?'speed '+i:i<=20?'speed '+(i-10)+' (override)':
+ ({21:'away',22:'minimum',23:'maximum',24:'auto',25:'auto night'}[i]||'?'+i);
+function status31DA(b){
+ if(b.length<21)return 'full status';
+ const u8=i=>b[i]==null||b[i]===0xEF?null:b[i];
+ const u16=i=>b[i+1]==null||((b[i]<<8)|b[i+1])===0x7FFF?null:(b[i]<<8)|b[i+1];
+ const pct=i=>u8(i)==null?null:u8(i)/2+'%';
+ const temp=i=>u16(i)==null?null:(u16(i)>=0x8000?u16(i)-0x10000:u16(i))/100+'°C';
+ const f=[['fan',u8(18)==null?null:FAN_INFO(b[18]&0x1F)],
+  ['exhaust',pct(19)],['supply',pct(20)],['bypass',pct(17)],
+  ['RH in',u8(5)==null?null:b[5]+'%'],['RH out',u8(6)==null?null:b[6]+'%'],
+  ['CO₂',u16(3)==null?null:u16(3)+' ppm'],['air quality',pct(1)],
+  ['T exhaust',temp(7)],['T supply',temp(9)],['T indoor',temp(11)],['T outdoor',temp(13)],
+  ['timer',u16(21)?u16(21)+' min':null],['post-heat',pct(23)],['pre-heat',pct(24)]];
+ return 'status '+f.filter(x=>x[1]!=null).map(x=>x[0]+' '+x[1]).join(', ');
+}
+// 10E0 layout as in ramses_rf: [14-17] date DD MM YYYY, [18..] model name.
+function deviceInfo10E0(b){
+ const end=b.indexOf(0,18),name=String.fromCharCode(...b.slice(18,end<0?b.length:end));
+ const made=b.length>17&&b[14]!==0xFF?b[14]+'-'+b[15]+'-'+((b[16]<<8)|b[17]):'';
+ return 'device info '+[name,made&&'made '+made].filter(Boolean).join(', ');
+}
+function meaning(s){
+ const p=s.trim().split(/\s+/);if(p.length<7)return '';
+ const [ty,,a0,a1,a2,c]=p,pl=p[7]||'';
+ const b=(pl.match(/../g)||[]).map(h=>parseInt(h,16));
+ const dev=a=>!a||a[0]==='-'?'':a===usId?'this board':(DEV[a.slice(0,2)]||'dev '+a.slice(0,2));
+ const to=dev(a1)&&a1!==a0?dev(a1):(dev(a2)&&a2!==a0?dev(a2):'');
+ const who=dev(a0)+(to?' → '+to:'');
+ const w16=i=>(b[i]<<8)|b[i+1],t16=i=>(w16(i)>=0x8000?w16(i)-0x10000:w16(i))/100;
+ const D={
+  '0001':()=>'RF check','0008':()=>'relay demand '+Math.round((b[1]||0)/2)+'%',
+  '042F':()=>'unit power-up','1060':()=>'battery '+(b[2]?'ok':'low'),
+  '10D0':()=>'filter '+(b[1]??'?')+'% left','10E0':()=>deviceInfo10E0(b),
+  '1298':()=>'CO₂ '+w16(1)+' ppm','12A0':()=>'humidity '+b[1]+'%',
+  '1FC9':()=>'bind / pairing','22F1':()=>'mode '+(MODE[b[1]]||'?'+b[1]),
+  '22F3':()=>'boost timer '+b[2]+' min',
+  '22F7':()=>'bypass '+({0:'close',200:'open',255:'auto'}[b[1]]??'?'+b[1]),
+  '2309':()=>'setpoint '+t16(1)+'°C','2411':()=>'fan parameter',
+  '30C9':()=>'temperature '+t16(1)+'°C','31D9':()=>'fan mode '+(MODE[b[2]]||'?'+b[2]),
+  '31DA':()=>status31DA(b),'31E0':()=>'ventilation demand '+(b[6]??'?')+'%',
+  '3EF0':()=>'actuator state'};
+ const what=D[c]?D[c]():'code '+c;
+ const verb=ty==='RQ'?'request ':ty==='W'?'set ':ty==='RP'?'reply ':'';
+ return who+': '+verb+what;
+}
 function load(){fetch('/api/log').then(r=>r.json()).then(j=>{
   $('#seen').innerHTML='Detected: remote <b>'+(seenR||'-')+'</b>, fan <b>'+(seenF||'-')+'</b>';
   const now=Math.max(...j.log.map(e=>e.t),0);
   $('#log').innerHTML=j.log.slice().reverse().map(e=>{
     const c=e.d==='R'?'rx':'tx';const r=e.d==='R'?(' '+e.r+'dBm'):'';
     return '<span class="'+c+'"><span class="tag">'+(e.d==='R'?'←':'→')+'</span>'+
-           fmtAge(e.t,now).padStart(4)+r.padStart(7)+'  '+e.s+'</span>';
+           fmtAge(e.t,now).padStart(4)+r.padStart(7)+'  '+e.s+'</span>'+
+           '  <span class="mean">'+meaning(e.s)+'</span>';
   }).join('\n')||'(nothing yet)';
 })}
 $('#clone').onclick=()=>{if(seenR)$('#us').value=seenR;if(seenF)$('#fan').value=seenF;};

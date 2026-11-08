@@ -10,7 +10,7 @@ struct Entry {
     uint32_t t;
     char     dir;
     int16_t  rssi;
-    char     str[96];
+    char     str[48 + 2 * ramses::MAX_PAYLOAD];
 };
 
 static Entry  g_buf[CAP];
@@ -74,11 +74,12 @@ size_t toJson(char* out, size_t cap) {
     for (size_t k = 0; k < g_count; k++) {
         size_t idx = (start + k) % CAP;
         Entry& e = g_buf[idx];
-        if (k) out[n++] = ',';
-        n += snprintf(out + n, cap - n,
-                      "{\"t\":%lu,\"d\":\"%c\",\"r\":%d,\"s\":\"%s\"}",
-                      (unsigned long)e.t, e.dir, e.rssi, e.str);
-        if (n > cap - 120) break;
+        char item[sizeof(e.str) + 64];
+        int len = snprintf(item, sizeof(item), "%s{\"t\":%lu,\"d\":\"%c\",\"r\":%d,\"s\":\"%s\"}",
+                           k ? "," : "", (unsigned long)e.t, e.dir, e.rssi, e.str);
+        if (n + len + 2 > cap) break;
+        memcpy(out + n, item, len);
+        n += len;
     }
     out[n++] = ']';
     out[n] = '\0';

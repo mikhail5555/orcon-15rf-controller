@@ -11,6 +11,8 @@ namespace radio {
 
 static volatile bool   g_rxFlag = false;
 static float           g_rssi   = -127.0f;
+static uint32_t        g_rxMaxBacklog = 0;
+static uint32_t        g_rxOverflows  = 0;
 static uint8_t         g_onair[ramses::MAX_ONAIR];
 
 #if defined(ESP32)
@@ -210,10 +212,32 @@ static bool configure() {
     return true;
 }
 
+static float g_peakRssi = -127.0f;
+
 void startReceive() {
-    g_radio.receiveDirect();                  // continuous FSK; demod streams on DIO2
-    while (rxUart.available()) rxUart.read();  // flush noise/partial bytes
+    g_radio.receiveDirect();
+    while (rxUart.available()) rxUart.read();
     g_rxlen = 0;
+}
+
+static void readUart() {
+    uint32_t backlog = rxUart.available();
+    if (backlog > g_rxMaxBacklog) g_rxMaxBacklog = backlog;
+    while (rxUart.available() && g_rxlen < sizeof(g_rxbuf))
+        g_rxbuf[g_rxlen++] = (uint8_t)rxUart.read();
+}
+
+static bool extractBufferedFrame(ramses::Frame& f) {
+    size_t consumed = 0;
+    bool ok = ramses::extractWireFrame(g_rxbuf, g_rxlen, &consumed, f);
+    if (consumed > 0) {
+        memmove(g_rxbuf, g_rxbuf + consumed, g_rxlen - consumed);
+        g_rxlen -= consumed;
+    } else if (g_rxlen == sizeof(g_rxbuf)) {
+        g_rxlen = 0;
+        g_rxOverflows++;
+    }
+    return ok;
 }
 
 bool begin() {
@@ -229,34 +253,31 @@ bool sendFrame(const ramses::Frame& f) {
     size_t n = ramses::encodeFrame(f, g_onair, sizeof(g_onair), RF_PREAMBLE_BYTES, &bits);
     if (!n) return false;
     static uint8_t txSync[2] = { 0x55, 0x53 };
-    g_radio.standby();                        // leave continuous/direct RX cleanly
+    g_radio.standby();
     g_radio.setEncoding(RADIOLIB_ENCODING_NRZ);
     g_radio.setSyncWord(txSync, sizeof(txSync));
     g_radio.fixedPacketLengthMode((uint8_t)n);
     int st = g_radio.transmit(g_onair, n);
-    startReceive();                           // straight back to listening
+    startReceive();
     if (st != RADIOLIB_ERR_NONE) { Serial.printf("[radio] sx1276 tx=%d\n", st); return false; }
     return true;
 }
 
 bool poll(ramses::Frame& out) {
-    while (rxUart.available() && g_rxlen < sizeof(g_rxbuf))
-        g_rxbuf[g_rxlen++] = (uint8_t)rxUart.read();
-    if (g_rxlen < 8) return false;
-    size_t consumed = 0;
-    bool ok = ramses::extractWireFrame(g_rxbuf, g_rxlen, &consumed, out);
-    if (ok) g_rssi = g_radio.getRSSI();
-    if (consumed > 0 && consumed <= g_rxlen) {
-        memmove(g_rxbuf, g_rxbuf + consumed, g_rxlen - consumed);
-        g_rxlen -= consumed;
-    } else if (g_rxlen >= sizeof(g_rxbuf)) {
-        g_rxlen = 0;                          // overflow guard
-    }
-    return ok;
+    // RSSI must be sampled while the sender is still on air; skipReceive keeps
+    // the radio in direct mode (otherwise RadioLib switches to packet RX).
+    g_peakRssi = max(g_peakRssi, g_radio.getRSSI(false, true));
+    readUart();
+    if (!extractBufferedFrame(out)) return false;
+    g_rssi = g_peakRssi;
+    g_peakRssi = -127.0f;
+    return true;
 }
 
 #endif // RADIO_SX1276
 
 float lastRssi() { return g_rssi; }
+uint32_t rxMaxBacklog() { return g_rxMaxBacklog; }
+uint32_t rxOverflows()  { return g_rxOverflows; }
 
 } // namespace radio
