@@ -219,10 +219,18 @@ void tick(uint32_t now) {
     if (now - g_lastInfo >= SEND_DEVINFO_INTERVAL_MS)  { g_lastInfo = now; sendDeviceInfo(); }
 }
 
-static float temp16(const uint8_t* p) {
+static void setTemp(float& dst, const uint8_t* p) {
     int16_t v = (int16_t)((p[0] << 8) | p[1]);
-    if (v == (int16_t)0x7FFF || v == (int16_t)0x8000) return 0;
-    return v / 100.0f;
+    if (v != (int16_t)0x7FFF && v != (int16_t)0x8000) dst = v / 100.0f;
+}
+
+static bool isOurFan(const ramses::DeviceId& d) {
+    return g_state.fanKnown && d == g_ids.fan;
+}
+
+static bool involvesOurFan(const ramses::Frame& f) {
+    for (int i = 0; i < 3; i++) if (f.has_addr[i] && isOurFan(f.addr[i])) return true;
+    return false;
 }
 static void learnFan(const ramses::DeviceId& d) {
     if (d.cls != DEV_FAN_CLASS || d.serial == 0) return;
@@ -255,20 +263,20 @@ bool onFrame(const ramses::Frame& f) {
     fmtFrame(f, g_state.lastRx, sizeof(g_state.lastRx));
     if (isRetransmission(f)) return false;
 
-    bool fromFan = false;
-    for (int i = 0; i < 3; i++) {
-        if (!f.has_addr[i]) continue;
-        if (f.addr[i].cls == DEV_FAN_CLASS) { learnFan(f.addr[i]); g_state.lastFanMs = millis(); }
-    }
-    if (f.has_addr[0] && f.addr[0].cls == DEV_FAN_CLASS) fromFan = true;
+    for (int i = 0; i < 3; i++)
+        if (f.has_addr[i] && f.addr[i].cls == DEV_FAN_CLASS) learnFan(f.addr[i]);
 
+    g_state.lastRxMs = millis();
+    if (!involvesOurFan(f)) return false;   // other households' devices
+    g_state.lastFanMs = millis();
+
+    bool fromFan = f.has_addr[0] && isOurFan(f.addr[0]);
     // The unit answered us: an RP / 31D9 / 0001 from the unit shortly after a TX.
     if (fromFan && (millis() - g_state.lastCmdMs < 6000) &&
         (f.type == ramses::MsgType::RP || f.cmd == 0x31D9 || f.cmd == 0x0001)) {
         g_state.txAckMs = millis();
     }
 
-    g_state.lastRxMs = millis();
     bool changed = false;
     const uint8_t* p = f.payload;
 
@@ -289,18 +297,18 @@ bool onFrame(const ramses::Frame& f) {
             g_state.raw31DAms = millis();
             if (f.len >= 5)  { uint16_t c = (uint16_t)((p[3] << 8) | p[4]); if (c != 0x7FFF) g_state.co2 = c; }
             if (f.len >= 6)  { if (p[5] <= 100) g_state.humidity = p[5]; }
-            if (f.len >= 9)  g_state.tempExhaust = temp16(&p[7]);
-            if (f.len >= 11) g_state.tempSupply  = temp16(&p[9]);
-            if (f.len >= 13) g_state.tempIndoor  = temp16(&p[11]);
-            if (f.len >= 15) g_state.tempOutdoor = temp16(&p[13]);
-            if (f.len >= 18) g_state.bypassOpen  = (p[17] != 0x00 && p[17] != 0xEF && p[17] != 0xFF);
+            if (f.len >= 9)  setTemp(g_state.tempExhaust, &p[7]);
+            if (f.len >= 11) setTemp(g_state.tempSupply,  &p[9]);
+            if (f.len >= 13) setTemp(g_state.tempIndoor,  &p[11]);
+            if (f.len >= 15) setTemp(g_state.tempOutdoor, &p[13]);
+            if (f.len >= 18 && p[17] != 0xEF && p[17] != 0xFF) g_state.bypassOpen = p[17] != 0x00;
             if (f.len >= 20) g_state.exhaustPct  = (p[19] <= 200) ? p[19] / 2 : g_state.exhaustPct;
             if (f.len >= 21) g_state.supplyPct   = (p[20] <= 200) ? p[20] / 2 : g_state.supplyPct;
             changed = true; break;
         case 0x31E0: if (f.len >= 7) { g_state.demand = p[6] > 100 ? 100 : p[6]; changed = true; } break;
         case 0x12A0:
             if (f.len >= 2) g_state.humidity   = p[1];
-            if (f.len >= 4) g_state.tempIndoor = temp16(&p[2]);
+            if (f.len >= 4) setTemp(g_state.tempIndoor, &p[2]);
             changed = true; break;
         case 0x1298: if (f.len >= 3) { g_state.co2 = (uint16_t)((p[1] << 8) | p[2]); changed = true; } break;
         case 0x10D0: if (f.len >= 2) { g_state.filterRemaining = p[1]; changed = true; } break;

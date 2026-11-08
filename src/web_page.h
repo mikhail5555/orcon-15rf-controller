@@ -139,6 +139,12 @@ input[type=range]{width:100%}label{color:var(--mut);font-size:13px}
 <div class="row"><b>Fan link</b><span id="pairLink">–</span></div>
 <button style="width:100%;margin-top:10px" data-pair>Pair with my Orcon</button>
 <div id="pairMsg" class="small" style="margin-top:8px">Power-cycle your Orcon, then tap Pair within 3 minutes.</div>
+<div class="metrics" style="margin-top:12px">
+<div class="row"><b>This board ID</b><input id="idUs" placeholder="37:012345" style="width:140px;background:#26303c;color:var(--fg);border:1px solid #313d4c;border-radius:8px;padding:6px"></div>
+<div class="row"><b>Fan ID</b><input id="idFan" placeholder="32:178990" style="width:140px;background:#26303c;color:var(--fg);border:1px solid #313d4c;border-radius:8px;padding:6px"></div>
+</div>
+<button id="idSave" style="width:100%;margin-top:10px">Save IDs</button>
+<div id="idMsg" class="small" style="margin-top:6px">Blank keeps the current ID. Only frames involving this fan update the status.</div>
 </div>
 
 <div class="card"><div class="small" style="margin-bottom:8px">Room temperatures (Domoticz IDX)</div>
@@ -215,6 +221,16 @@ document.querySelectorAll('[data-pair]').forEach(b=>b.onclick=()=>{send({pair:1}
 if($('#pl'))$('#pl').onchange=e=>send({plearn:e.target.checked?1:0});
 if($('#maskids'))$('#maskids').onchange=e=>send({maskids:e.target.checked?1:0}).then(()=>setTimeout(refresh,300));
 if($('#showfilter'))$('#showfilter').onchange=e=>send({showfilter:e.target.checked?1:0}).then(()=>setTimeout(refresh,300));
+let curIds={us:'',fan:''};
+$('#idSave').onclick=()=>{
+ const pa=s=>{const m=(s||'').trim().split(':');return m.length===2&&m[0]&&m[1]?[parseInt(m[0],10),parseInt(m[1],10)]:null};
+ const u=pa($('#idUs').value)||pa(curIds.us),f=pa($('#idFan').value)||pa(curIds.fan);
+ if(!u){$('#idMsg').textContent='Enter IDs as cc:serial, e.g. 37:012345';return;}
+ const body={us_class:u[0],us_serial:u[1]};
+ if(f){body.fan_class=f[0];body.fan_serial=f[1];}
+ fetch('/api/ids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(()=>{$('#idUs').value=$('#idFan').value='';$('#idMsg').textContent='Saved.';setTimeout(refresh,300);});
+};
 if($('#riSave'))$('#riSave').onclick=()=>{var a=[];for(var i=0;i<7;i++){var el=$('#ri'+i);a.push(el&&el.value?+el.value:0);}send({roomidx:a}).then(()=>{if($('#riMsg'))$('#riMsg').textContent='Saved.';setTimeout(refresh,400);});};
 document.querySelector('[data-selftest]').onclick=()=>send({selftest:1});
 document.querySelector('[data-connect]').onclick=()=>send({connect:1});
@@ -257,6 +273,9 @@ function refresh(){fetch('/api/state').then(r=>r.json()).then(s=>{
    else if(s.pair==='timeout')pm.innerHTML='<span style="color:var(--warn)">No fan found.</span> Power-cycle the Orcon and tap Pair again.';
    else pm.textContent='Power-cycle your Orcon, then tap Pair within 3 minutes.';
  }
+ curIds={us:s.us_id,fan:s.fan_known?s.fan_id:''};
+ $('#idUs').placeholder=fmtId(s.us_id,s.mask_ids);
+ $('#idFan').placeholder=s.fan_known?fmtId(s.fan_id,s.mask_ids):'not set';
  if($('#pl'))$('#pl').checked=!!s.plearn;
  if($('#maskids'))$('#maskids').checked=!!s.mask_ids;
  if($('#showfilter'))$('#showfilter').checked=!!s.show_filter;
@@ -419,6 +438,12 @@ function status31DA(b){
   ['timer',u16(21)?u16(21)+' min':null],['post-heat',pct(23)],['pre-heat',pct(24)]];
  return 'status '+f.filter(x=>x[1]!=null).map(x=>x[0]+' '+x[1]).join(', ');
 }
+// 10E0 layout as in ramses_rf: [14-17] date DD MM YYYY, [18..] model name.
+function deviceInfo10E0(b){
+ const end=b.indexOf(0,18),name=String.fromCharCode(...b.slice(18,end<0?b.length:end));
+ const made=b.length>17&&b[14]!==0xFF?b[14]+'-'+b[15]+'-'+((b[16]<<8)|b[17]):'';
+ return 'device info '+[name,made&&'made '+made].filter(Boolean).join(', ');
+}
 function meaning(s){
  const p=s.trim().split(/\s+/);if(p.length<7)return '';
  const [ty,,a0,a1,a2,c]=p,pl=p[7]||'';
@@ -427,11 +452,10 @@ function meaning(s){
  const to=dev(a1)&&a1!==a0?dev(a1):(dev(a2)&&a2!==a0?dev(a2):'');
  const who=dev(a0)+(to?' → '+to:'');
  const w16=i=>(b[i]<<8)|b[i+1],t16=i=>(w16(i)>=0x8000?w16(i)-0x10000:w16(i))/100;
- const ascii=()=>(b.map(x=>x>=32&&x<127?String.fromCharCode(x):'\0').join('').match(/[ -~]{3,}$/)||[''])[0];
  const D={
   '0001':()=>'RF check','0008':()=>'relay demand '+Math.round((b[1]||0)/2)+'%',
   '042F':()=>'unit power-up','1060':()=>'battery '+(b[2]?'ok':'low'),
-  '10D0':()=>'filter '+(b[1]??'?')+'% left','10E0':()=>'device info '+ascii(),
+  '10D0':()=>'filter '+(b[1]??'?')+'% left','10E0':()=>deviceInfo10E0(b),
   '1298':()=>'CO₂ '+w16(1)+' ppm','12A0':()=>'humidity '+b[1]+'%',
   '1FC9':()=>'bind / pairing','22F1':()=>'mode '+(MODE[b[1]]||'?'+b[1]),
   '22F3':()=>'boost timer '+b[2]+' min',
