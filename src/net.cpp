@@ -4,6 +4,7 @@
 #include "config.h"
 #include "orcon.h"
 #include "orcon_log.h"
+#include "peers.h"
 #include "ramses_radio.h"
 #if defined(USE_CC1101_TX) || defined(RADIO_CC1101_ASYNC)
 #include "cc1101_tx.h"
@@ -115,6 +116,27 @@ static void saveIds(uint8_t uc, uint32_t us, uint8_t fc, uint32_t fs) {
     prefs.putUInt("uc", uc); prefs.putUInt("us", us);
     prefs.putUInt("fc", fc); prefs.putUInt("fs", fs);
     prefs.end();
+}
+// Only the ids are persisted (rarely changes); last messages stay in RAM.
+static void savePeers() {
+    uint32_t raw[peers::CAP];
+    size_t n = peers::count();
+    for (size_t i = 0; i < n; i++) raw[i] = peers::at(i).id.raw();
+    prefs.begin("orcon", false);
+    prefs.putBytes("peers", raw, n * sizeof(uint32_t));
+    prefs.end();
+    peers::clearDirty();
+}
+static void loadPeers() {
+    uint32_t raw[peers::CAP];
+    prefs.begin("orcon", true);
+    size_t bytes = prefs.isKey("peers") ? prefs.getBytes("peers", raw, sizeof(raw)) : 0;
+    prefs.end();
+    peers::restore(raw, bytes / sizeof(uint32_t), DEV_FAN_CLASS);
+}
+static void forgetPeers() {
+    peers::restore(nullptr, 0, DEV_FAN_CLASS);
+    savePeers();
 }
 
 static void idStr(const ramses::DeviceId& d, char* out, size_t cap) {
@@ -250,6 +272,8 @@ static void applyCommand(JsonDocument& d) {
     if (!d["autorestore"].isNull()) { orcon::setAutoRestore((int)(d["autorestore"] | 0) != 0); saveKeeper(); }
     if (!d["reapply"].isNull())      orcon::reapplySaved();
     if (!d["forget"].isNull())     { for (int i = 0; i < 7; i++) orcon::setFanSaved(i, -1); orcon::setBypassSaved(-1); saveKeeper(); }
+    if (!d["forget_peers"].isNull()) forgetPeers();
+    if (!d["rx_bw"].isNull()) radio::setRxTuning(d["rx_bw"] | RF_RXBW_KHZ, (d["rx_lna"] | 0) != 0);
     if (!d["raw_code"].isNull()) {
         const char* tn = d["raw_type"] | "I";
         uint8_t ty = 0;
@@ -274,6 +298,7 @@ static void applyCommand(JsonDocument& d) {
 static void handleRoot()  { server.send_P(200, "text/html", INDEX_HTML); }
 static void handleWifi()  { server.send_P(200, "text/html", SETUP_HTML); }
 static void handleLogPg() { server.send_P(200, "text/html", LOG_HTML);  }
+static void handleRamsesJs() { server.send_P(200, "application/javascript", RAMSES_JS); }
 static void handleWidget() { server.send_P(200, "text/html", WIDGET_HTML); }
 static void handleFlow()   { server.send_P(200, "text/html", FLOW_HTML);   }
 static void handleHouseImg() {
@@ -303,6 +328,29 @@ static void handleState() {
     char buf[1400]; buildStateJson(buf, sizeof(buf));
     server.send(200, "application/json", buf);
 }
+
+// GET /api/peers -> { peers:[{id,age,r,n,s,co2?,dem?,mode?,rh?}] }  age in s, -1 = not heard since boot
+static void handlePeers() {
+    JsonDocument d;
+    JsonArray a = d["peers"].to<JsonArray>();
+    uint32_t now = millis();
+    for (size_t i = 0; i < peers::count(); i++) {
+        const peers::Peer& p = peers::at(i);
+        char id[16]; idStr(p.id, id, sizeof(id));
+        JsonObject o = a.add<JsonObject>();
+        o["id"]  = id;
+        o["age"] = p.heardMs ? (long)((now - p.heardMs) / 1000) : -1L;
+        o["r"]   = p.rssi;
+        o["n"]   = p.count;
+        o["s"]   = p.last;
+        if (p.co2 >= 0)      o["co2"]  = p.co2;
+        if (p.demand >= 0)   o["dem"]  = p.demand / 2.0;
+        if (p.mode >= 0)     o["mode"] = orcon::modeName((orcon::Mode)p.mode);
+        if (p.humidity >= 0) o["rh"]   = p.humidity;
+    }
+    String out; serializeJson(d, out);
+    server.send(200, "application/json", out);
+}
 static void handleNetCfg() {   // current WiFi SSID + MQTT host, to prefill the setup page
     JsonDocument d;
     d["ssid"] = g_ssid;
@@ -319,17 +367,12 @@ static void handleCmd() {
     server.send(200, "application/json", "{\"ok\":1}");
 }
 
-// GET /api/log -> { log:[...], seen_remote, seen_fan }
+// GET /api/log -> { log:[...] }
 static void handleLog() {
     static char buf[12288];
     size_t n = snprintf(buf, sizeof(buf), "{\"log\":");
     n += rlog::toJson(buf + n, sizeof(buf) - n);
-    const rlog::Seen& s = rlog::seen();
-    char rem[16] = "", fan[16] = "";
-    if (s.haveRemote) idStr(s.remote, rem, sizeof(rem));
-    if (s.haveFan)    idStr(s.fan,    fan, sizeof(fan));
-    snprintf(buf + n, sizeof(buf) - n,
-             ",\"seen_remote\":\"%s\",\"seen_fan\":\"%s\"}", rem, fan);
+    snprintf(buf + n, sizeof(buf) - n, "}");
     server.send(200, "application/json", buf);
 }
 
@@ -343,6 +386,7 @@ static void handleIds() {
     uint32_t us = (uint32_t)(d["us_serial"] | 0);
     uint8_t  fc = (uint8_t)(d["fan_class"] | (int)DEV_FAN_CLASS);
     uint32_t fs = (uint32_t)(d["fan_serial"]| 0);
+    if (!(orcon::ids().fan == ramses::DeviceId(fc, fs))) forgetPeers();   // they talked to the old fan
     saveIds(uc, us, fc, fs);
     orcon::setIds(uc, us, fc, fs);
     g_dirty = true;
@@ -557,10 +601,22 @@ static void oledDraw() {
 // ---------------------------------------------------------------------------
 // WiFi
 // ---------------------------------------------------------------------------
+static const uint32_t WIFI_RETRY_MS = 30000;
+static uint32_t g_lastStaRetry = 0;
+static bool     g_otaStarted   = false;
+
+static void startOta() {
+    if (g_otaStarted) return;
+    ArduinoOTA.setHostname("orcon15rf");
+    ArduinoOTA.begin();
+    g_otaStarted = true;
+}
+
 static void wifiConnect() {
     g_apMode = (g_ssid.length() == 0);
     if (!g_apMode) {
         WiFi.mode(WIFI_STA);
+        WiFi.setAutoReconnect(true);
         WiFi.begin(g_ssid.c_str(), g_pass.c_str());
         uint32_t t0 = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(250); oledDraw(); }
@@ -573,19 +629,42 @@ static void wifiConnect() {
         WiFi.mode(WIFI_AP_STA);
         WiFi.softAP(WIFI_AP_NAME, WIFI_AP_PASS);
         snprintf(g_ip, sizeof(g_ip), "%s", WiFi.softAPIP().toString().c_str());
+        g_lastStaRetry = millis();
     }
+}
+
+// A slow router at boot must not strand us in the setup AP: keep retrying the
+// stored network in the background, but leave the AP alone while someone is
+// connected to it (a retry scan would hop its channel mid-configuration).
+static void wifiMaintain() {
+    if (!g_apMode) {
+        if (WiFi.status() == WL_CONNECTED)
+            snprintf(g_ip, sizeof(g_ip), "%s", WiFi.localIP().toString().c_str());
+        return;
+    }
+    if (g_ssid.length() == 0) return;
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.softAPdisconnect(true);
+        g_apMode = false;
+        snprintf(g_ip, sizeof(g_ip), "%s", WiFi.localIP().toString().c_str());
+        startOta();
+        g_dirty = true;
+        return;
+    }
+    if (WiFi.softAPgetStationNum() > 0) return;
+    if (millis() - g_lastStaRetry < WIFI_RETRY_MS) return;
+    g_lastStaRetry = millis();
+    WiFi.begin(g_ssid.c_str(), g_pass.c_str());
 }
 
 // ---------------------------------------------------------------------------
 void begin() {
     loadConfig();          // also applies stored device IDs via orcon::setIds
+    loadPeers();
     oledInit();
     wifiConnect();
 
-    if (!g_apMode) {                    // OTA only makes sense on the home network
-        ArduinoOTA.setHostname("orcon15rf");
-        ArduinoOTA.begin();
-    }
+    if (!g_apMode) startOta();          // OTA only makes sense on the home network
 
     server.on("/",          handleRoot);
     server.on("/wifi",      handleWifi);
@@ -598,6 +677,8 @@ void begin() {
     server.on("/update",    HTTP_GET,  handleUpdatePage);
     server.on("/update",    HTTP_POST, handleUpdateDone, handleUpdateUpload);
     server.on("/api/state", handleState);
+    server.on("/api/peers", handlePeers);
+    server.on("/ramses.js", handleRamsesJs);
     server.on("/api/netcfg", handleNetCfg);
     server.on("/api/cmd",   HTTP_POST, handleCmd);
     server.on("/api/log",   handleLog);
@@ -648,7 +729,9 @@ void loop() {
         orcon::clearIdsDirty();
         g_dirty = true;
     }
-    if (!g_apMode) ArduinoOTA.handle();
+    if (peers::dirty()) savePeers();
+    wifiMaintain();
+    if (g_otaStarted) ArduinoOTA.handle();
     server.handleClient();
 #if MQTT_ENABLED
     mqttReconnect();

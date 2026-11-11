@@ -1,5 +1,6 @@
 // ramses_radio.cpp — see ramses_radio.h
 #include "ramses_radio.h"
+#include "rssi_window.h"
 #include "config.h"
 #include <Arduino.h>
 #include <RadioLib.h>
@@ -191,14 +192,29 @@ bool poll(ramses::Frame& out) {
 //       UART at 38400 8N1 (== the RAMSES byte framing) re-frames it and
 //       extractWireFrame() decodes it (the exact path proven on CC1101 GDO2).
 //   TX: FSK packet mode — the full on-air frame is stuffed as raw payload.
+//  RX runs in its own task on core 0 (the Arduino loop is on core 1): every
+//  ~1 ms it samples RSSI and drains the UART, both timestamped, so each frame
+//  gets the RSSI measured while *it* was on air, however busy the loop is.
 // ===========================================================================
 #if defined(RADIO_SX1276)
 #include <HardwareSerial.h>
 
-static SX1276 g_radio = new Module(PIN_SX_NSS, PIN_SX_DIO0, PIN_SX_RST, PIN_SX_DIO1);
+static Module g_mod(PIN_SX_NSS, PIN_SX_DIO0, PIN_SX_RST, PIN_SX_DIO1);
+static SX1276 g_radio(&g_mod);
 static HardwareSerial rxUart(1);     // reads the demodulated data off DIO2
 static uint8_t  g_rxbuf[320];
+static uint32_t g_rxts[sizeof(g_rxbuf)];   // ms each buffered byte was read
 static size_t   g_rxlen = 0;
+
+static SemaphoreHandle_t g_radioLock;      // SPI access: RX task vs. sendFrame()
+static QueueHandle_t     g_frameQ;
+static volatile bool     g_flushRx = false; // set after TX: drop the garbage read meanwhile
+
+struct RxItem { ramses::Frame f; int16_t rssi; };
+
+static const size_t RSSI_CAP = 256;        // ~256 ms of history at 1 sample/ms
+static rssiwin::Sample g_rssiRing[RSSI_CAP];
+static size_t   g_rssiHead = 0, g_rssiCount = 0;
 
 const char* name() { return "SX1276 direct RX + packet TX"; }
 
@@ -212,26 +228,73 @@ static bool configure() {
     return true;
 }
 
-static float g_peakRssi = -127.0f;
-
 void startReceive() {
+    xSemaphoreTake(g_radioLock, portMAX_DELAY);
     g_radio.receiveDirect();
-    while (rxUart.available()) rxUart.read();
-    g_rxlen = 0;
+    xSemaphoreGive(g_radioLock);
+    g_flushRx = true;
 }
 
-static void readUart() {
+bool setRxTuning(float rxBwKhz, bool lnaBoost) {
+    xSemaphoreTake(g_radioLock, portMAX_DELAY);
+    g_radio.standby();
+    int st = g_radio.setRxBandwidth(rxBwKhz);
+    // RadioLib only touches the HF LNA boost in LoRa mode.
+    g_mod.SPIsetRegValue(RADIOLIB_SX127X_REG_LNA,
+                         lnaBoost ? RADIOLIB_SX127X_LNA_BOOST_ON : RADIOLIB_SX127X_LNA_BOOST_OFF, 1, 0);
+    g_radio.receiveDirect();
+    xSemaphoreGive(g_radioLock);
+    g_flushRx = true;
+    return st == RADIOLIB_ERR_NONE;
+}
+
+// --- RX task (core 0) ---------------------------------------------------------
+static void sampleRssi(uint32_t now) {
+    if (xSemaphoreTake(g_radioLock, 0) != pdTRUE) return;   // a TX holds the radio
+    // skipReceive keeps the radio in direct mode (else RadioLib switches to packet RX).
+    float dbm = g_radio.getRSSI(false, true);
+    xSemaphoreGive(g_radioLock);
+    g_rssiRing[g_rssiHead] = { now, (int16_t)lroundf(dbm) };
+    g_rssiHead = (g_rssiHead + 1) % RSSI_CAP;
+    if (g_rssiCount < RSSI_CAP) g_rssiCount++;
+}
+
+static void readUart(uint32_t now) {
+    if (g_flushRx) {
+        g_flushRx = false;
+        while (rxUart.available()) rxUart.read();
+        g_rxlen = 0;
+    }
     uint32_t backlog = rxUart.available();
     if (backlog > g_rxMaxBacklog) g_rxMaxBacklog = backlog;
-    while (rxUart.available() && g_rxlen < sizeof(g_rxbuf))
+    while (rxUart.available() && g_rxlen < sizeof(g_rxbuf)) {
+        g_rxts[g_rxlen] = now;
         g_rxbuf[g_rxlen++] = (uint8_t)rxUart.read();
+    }
 }
 
-static bool extractBufferedFrame(ramses::Frame& f) {
+// On-air time of a frame: SYNC(5) + Manchester(2 per logical byte) + STOP(1),
+// each byte 10 bits (8N1) at 38.4 kbps.
+static size_t wireLength(const ramses::Frame& f) {
+    uint8_t logical[ramses::MAX_LOGICAL];
+    return 5 + 2 * ramses::buildLogical(f, logical, sizeof(logical)) + 1;
+}
+
+static int16_t rssiForFrame(const ramses::Frame& f, size_t consumed) {
+    size_t wire = wireLength(f);
+    size_t first = consumed > wire ? consumed - wire : 0;
+    uint32_t airMs = (uint32_t)(wire * 10 * 1000 / 38400) + 1;
+    return rssiwin::frameRssi(g_rssiRing, RSSI_CAP, g_rssiHead, g_rssiCount,
+                              g_rxts[first] - 1, g_rxts[consumed - 1], airMs + 3);
+}
+
+static bool extractBufferedFrame(RxItem& it) {
     size_t consumed = 0;
-    bool ok = ramses::extractWireFrame(g_rxbuf, g_rxlen, &consumed, f);
+    bool ok = ramses::extractWireFrame(g_rxbuf, g_rxlen, &consumed, it.f);
+    if (ok) it.rssi = rssiForFrame(it.f, consumed);
     if (consumed > 0) {
         memmove(g_rxbuf, g_rxbuf + consumed, g_rxlen - consumed);
+        memmove(g_rxts, g_rxts + consumed, (g_rxlen - consumed) * sizeof(g_rxts[0]));
         g_rxlen -= consumed;
     } else if (g_rxlen == sizeof(g_rxbuf)) {
         g_rxlen = 0;
@@ -240,11 +303,26 @@ static bool extractBufferedFrame(ramses::Frame& f) {
     return ok;
 }
 
+static void rxTask(void*) {
+    RxItem it;
+    for (;;) {
+        uint32_t now = millis();
+        sampleRssi(now);              // before reading: this sample precedes the bytes read now
+        readUart(now);
+        while (extractBufferedFrame(it)) xQueueSend(g_frameQ, &it, 0);
+        vTaskDelay(1);
+    }
+}
+
 bool begin() {
+    g_radioLock = xSemaphoreCreateMutex();
+    g_frameQ = xQueueCreate(16, sizeof(RxItem));
     SPI.begin(PIN_SX_SCK, PIN_SX_MISO, PIN_SX_MOSI, PIN_SX_NSS);
     bool ok = configure();
     rxUart.setRxBufferSize(8192);
     rxUart.begin(38400, SERIAL_8N1, PIN_SX_DIO2 /*rx*/, -1 /*tx unused*/);
+    rxUart.setRxFIFOFull(1);          // hand over every byte now (default 120 = ~31 ms chunks)
+    xTaskCreatePinnedToCore(rxTask, "ramses_rx", 6144, nullptr, 10, nullptr, 0);
     return ok;
 }
 
@@ -253,28 +331,35 @@ bool sendFrame(const ramses::Frame& f) {
     size_t n = ramses::encodeFrame(f, g_onair, sizeof(g_onair), RF_PREAMBLE_BYTES, &bits);
     if (!n) return false;
     static uint8_t txSync[2] = { 0x55, 0x53 };
+    xSemaphoreTake(g_radioLock, portMAX_DELAY);
     g_radio.standby();
+    // receiveDirect() left the modem in continuous mode, where TX ignores the
+    // FIFO and modulates whatever sits on DIO2 (our UART RX pin).
+    g_radio.packetMode();
     g_radio.setEncoding(RADIOLIB_ENCODING_NRZ);
     g_radio.setSyncWord(txSync, sizeof(txSync));
     g_radio.fixedPacketLengthMode((uint8_t)n);
     int st = g_radio.transmit(g_onair, n);
-    startReceive();
+    g_radio.receiveDirect();
+    xSemaphoreGive(g_radioLock);
+    g_flushRx = true;
     if (st != RADIOLIB_ERR_NONE) { Serial.printf("[radio] sx1276 tx=%d\n", st); return false; }
     return true;
 }
 
 bool poll(ramses::Frame& out) {
-    // RSSI must be sampled while the sender is still on air; skipReceive keeps
-    // the radio in direct mode (otherwise RadioLib switches to packet RX).
-    g_peakRssi = max(g_peakRssi, g_radio.getRSSI(false, true));
-    readUart();
-    if (!extractBufferedFrame(out)) return false;
-    g_rssi = g_peakRssi;
-    g_peakRssi = -127.0f;
+    RxItem it;
+    if (xQueueReceive(g_frameQ, &it, 0) != pdTRUE) return false;
+    out = it.f;
+    g_rssi = it.rssi;
     return true;
 }
 
 #endif // RADIO_SX1276
+
+#if !defined(RADIO_SX1276)
+bool setRxTuning(float, bool) { return false; }
+#endif
 
 float lastRssi() { return g_rssi; }
 uint32_t rxMaxBacklog() { return g_rxMaxBacklog; }

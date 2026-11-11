@@ -31,6 +31,10 @@ bool poll(ramses::Frame& out);
 // Last measured RSSI (dBm) of a received packet, for diagnostics.
 float lastRssi();
 
+// Retune the receiver at runtime (filter bandwidth, LNA boost) for A/B tests.
+// SX1276 back-end only; returns false elsewhere.
+bool setRxTuning(float rxBwKhz, bool lnaBoost);
+
 // RX diagnostics, SX1276 back-end only.
 uint32_t rxMaxBacklog();
 uint32_t rxOverflows();

@@ -1,6 +1,5 @@
 // orcon_log.h — in-RAM ring buffer of RAMSES frames (RX + TX), viewable over
-// the web with no USB serial. Also auto-detects a REM (remote) controlling a
-// FAN so the device can be "cloned" without binding.
+// the web with no USB serial.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -21,16 +20,5 @@ void add(char dir, const ramses::Frame& f, int rssi);
 // Serialize recent entries (newest last) as a JSON array of
 //   {"t":<ms>,"d":"R","s":"<frame str>","r":<rssi>}
 size_t toJson(char* out, size_t cap);
-
-// --- clone auto-detect ------------------------------------------------------
-// When we hear an I 22F1/22F3/31D9 involving a REM (class 0x1D) and a FAN
-// (class 0x20), remember those ids so the UI can offer "clone this remote".
-struct Seen {
-    bool             haveRemote = false;
-    bool             haveFan    = false;
-    ramses::DeviceId remote;
-    ramses::DeviceId fan;
-};
-const Seen& seen();
 
 } // namespace rlog

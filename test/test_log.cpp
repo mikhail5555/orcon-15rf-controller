@@ -22,14 +22,12 @@ int main(){
     printf("  fmt: %s\n", buf);
     CHECK(strstr(buf,"--:------")!=nullptr && strstr(buf,"1298 003 00027F")!=nullptr,
           "1298 formats self-broadcast with empty addr1");
-    // log add + json + clone detect (simulate hearing a real remote->fan 22F1)
+    // log add + json (simulate hearing a real remote->fan 22F1)
     Frame heard = make22F1(id, Mode::Low);   // addr0=29(REM), addr1=32(FAN)
     rlog::add('R', heard, -73);
     rlog::add('T', make31E0(id,50), 0);
     char j[2048]; rlog::toJson(j,sizeof(j));
     CHECK(strstr(j,"\"d\":\"R\"")&&strstr(j,"\"d\":\"T\"")&&strstr(j,"\"r\":-73"), "toJson has RX+TX entries with rssi");
-    CHECK(rlog::seen().haveRemote && rlog::seen().remote.cls==0x1D, "clone-detect found the remote id");
-    CHECK(rlog::seen().haveFan && rlog::seen().fan.cls==0x20, "clone-detect found the fan id");
     const char* v=failures?"FAILED":"ALL PASSED"; const char* pl=failures==1?"":"s";
     printf("\n%s (%d failure%s)\n",v,failures,pl);
     return failures?1:0;

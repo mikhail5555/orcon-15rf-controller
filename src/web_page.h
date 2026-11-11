@@ -39,6 +39,10 @@ input[type=range]{width:100%}label{color:var(--mut);font-size:13px}
 .cols{display:grid;grid-template-columns:1fr}
 .col{min-width:0}
 @media(min-width:760px){.wrap{max-width:900px}.cols{grid-template-columns:1fr 1fr;column-gap:16px;align-items:start}}
+table.peers{width:100%;border-collapse:collapse;font-size:13px}
+.peers th{text-align:left;color:var(--mut);font-weight:500;padding:4px 6px;border-bottom:1px solid #313d4c}
+.peers td{padding:6px;border-bottom:1px solid #232c38;vertical-align:top}
+.peers td:first-child{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:nowrap}
 </style></head><body><div class="wrap">
 <h1><span id="dot" class="dot"></span> Orcon 15RF <span id="mode" class="small"></span></h1>
 
@@ -132,6 +136,11 @@ input[type=range]{width:100%}label{color:var(--mut);font-size:13px}
 </div></div>
 
 </div></div>
+<div class="card"><div class="small" style="margin-bottom:8px">Devices talking to this fan</div>
+<div style="overflow-x:auto"><table class="peers"><thead><tr><th>Device</th><th>Type</th><th>Readings</th><th>Last message</th><th>Heard</th><th>dBm</th></tr></thead>
+<tbody id="peers"><tr><td colspan="6" class="small">None heard yet — they appear once they send something to the fan.</td></tr></tbody></table></div>
+<button style="margin-top:8px" data-forgetpeers>Forget devices</button>
+</div>
 <button id="setBtn" style="width:100%;margin-bottom:14px;background:#1a212b;border:1px solid #313d4c">⚙ Settings &amp; advanced</button>
 <div id="adv" style="display:none">
 
@@ -199,6 +208,7 @@ input[type=range]{width:100%}label{color:var(--mut);font-size:13px}
 <p class="small"><a href="/update" style="color:var(--acc)">Update firmware (OTA upload) &rarr;</a></p>
 </div><!-- /adv -->
 </div>
+<script src="/ramses.js"></script>
 <script>
 const $=s=>document.querySelector(s);
 function fmtId(id,mask){if(!id)return id||'';if(!mask)return id;const p=(''+id).split(':');if(p.length!==2||p[1].length<4)return id;return p[0]+':'+p[1].slice(0,2)+'••'+p[1].slice(-2);}
@@ -237,6 +247,7 @@ document.querySelector('[data-connect]').onclick=()=>send({connect:1});
 document.querySelector('[data-raw]').onclick=()=>send({raw_type:$('#rty').value,raw_code:$('#rco').value.trim(),raw_pl:$('#rpl').value.replace(/\s+/g,'')});
 function num(x){return (x===null||x===undefined)?'–':x}
 function refresh(){fetch('/api/state').then(r=>r.json()).then(s=>{
+ lastState=s;
  $('#mode').textContent=s.mode||'';
  {var act=(s.cmd_mode&&s.cmd_mode!='unknown')?s.cmd_mode:s.mode;
   document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('sel',b.dataset.m===act));}
@@ -292,7 +303,23 @@ function refresh(){fetch('/api/state').then(r=>r.json()).then(s=>{
  $('#tst').innerHTML=t;
  $('#ack').innerHTML=s.tx_ack?'<span style="color:var(--ok)">&#10003; UNIT REPLIED TO US</span>':'';
 })}
-refresh();setInterval(refresh,2000);
+let lastState={};
+function fmtHeard(a){return a<0?'not since boot':a<90?a+'s ago':a<5400?Math.round(a/60)+'m ago':Math.round(a/3600)+'h ago';}
+function loadPeers(){fetch('/api/peers').then(r=>r.json()).then(j=>{
+ if(!j.peers.length)return;
+ const rows=j.peers.slice().sort((a,b)=>(a.age<0)-(b.age<0)||a.age-b.age).map(p=>{
+  const tr=document.createElement('tr');
+  const cell=(t,title)=>{const td=document.createElement('td');td.textContent=t;if(title)td.title=title;tr.appendChild(td);};
+  const rd=[p.co2!=null&&'CO₂ '+p.co2+' ppm',p.dem!=null&&'demand '+p.dem+'%',
+   p.mode&&'mode '+p.mode,p.rh!=null&&'RH '+p.rh+'%'].filter(Boolean);
+  cell(fmtId(p.id,lastState.mask_ids));cell(devType(p.id));cell(rd.join(' · ')||'–');
+  cell(p.s?meaning(p.s,lastState.us_id).replace(/^[^:]*: /,''):'–',p.s+(p.n?' ('+p.n+' frames)':''));
+  cell(fmtHeard(p.age));cell(p.age<0?'–':p.r);
+  return tr;});
+ $('#peers').replaceChildren(...rows);
+})}
+document.querySelector('[data-forgetpeers]').onclick=()=>{if(confirm('Forget all detected devices? They reappear when they next talk to the fan.'))send({forget_peers:1}).then(()=>location.reload());};
+refresh();setInterval(refresh,2000);loadPeers();setInterval(loadPeers,3000);
 </script></body></html>)HTML";
 
 // --- WiFi / MQTT setup portal (served at /wifi) ------------------------------
@@ -364,6 +391,71 @@ scan();
 </script></body></html>)SETUP";
 
 // --- RF log + device-ID / clone page (served at /log) ------------------------
+// Frame decoder shared by the dashboard and the RF log (served as /ramses.js).
+static const char RAMSES_JS[] PROGMEM = R"JS(// Human-readable meaning of a logged frame, e.g. "remote → fan: mode medium".
+const DEV={'01':'controller','04':'radiator valve','13':'relay','18':'gateway','29':'remote',
+ '32':'fan','34':'thermostat','37':'15RF controller','63':'broadcast'};
+const MODE=['away','low','medium','high','auto','auto2','boost','disable'];
+// 31DA layout as in ramses_rf; 0xEF / 0x7FFF mean "not available".
+const FAN_INFO=i=>i===0?'off':i<=10?'speed '+i:i<=20?'speed '+(i-10)+' (override)':
+ ({21:'away',22:'minimum',23:'maximum',24:'auto',25:'auto night'}[i]||'?'+i);
+function status31DA(b){
+ if(b.length<21)return 'full status';
+ const u8=i=>b[i]==null||b[i]===0xEF?null:b[i];
+ const u16=i=>b[i+1]==null||((b[i]<<8)|b[i+1])===0x7FFF?null:(b[i]<<8)|b[i+1];
+ const pct=i=>u8(i)==null?null:u8(i)/2+'%';
+ const temp=i=>u16(i)==null?null:(u16(i)>=0x8000?u16(i)-0x10000:u16(i))/100+'°C';
+ const f=[['fan',u8(18)==null?null:FAN_INFO(b[18]&0x1F)],
+  ['exhaust',pct(19)],['supply',pct(20)],['bypass',pct(17)],
+  ['RH in',u8(5)==null?null:b[5]+'%'],['RH out',u8(6)==null?null:b[6]+'%'],
+  ['CO₂',u16(3)==null?null:u16(3)+' ppm'],['air quality',pct(1)],
+  ['T exhaust',temp(7)],['T supply',temp(9)],['T indoor',temp(11)],['T outdoor',temp(13)],
+  ['timer',u16(21)?u16(21)+' min':null],['post-heat',pct(23)],['pre-heat',pct(24)]];
+ return 'status '+f.filter(x=>x[1]!=null).map(x=>x[0]+' '+x[1]).join(', ');
+}
+// 31E0 is a list of 4-byte elements [idx][flags][demand 0..200][?].
+function demand31E0(b){
+ const v=[];for(let i=0;i+2<b.length;i+=4)v.push(b[i+2]<=200?b[i+2]/2+'%':'?');
+ return v.join(' / ')||'?';
+}
+// 10E0 layout as in ramses_rf: [14-17] date DD MM YYYY, [18..] model name.
+function deviceInfo10E0(b){
+ const end=b.indexOf(0,18),name=String.fromCharCode(...b.slice(18,end<0?b.length:end));
+ const made=b.length>17&&b[14]!==0xFF?b[14]+'-'+b[15]+'-'+((b[16]<<8)|b[17]):'';
+ return 'device info '+[name,made&&'made '+made].filter(Boolean).join(', ');
+}
+function meaning(s,self){
+ const p=s.trim().split(/\s+/);if(p.length<7)return '';
+ const [ty,,a0,a1,a2,c]=p,pl=p[7]||'';
+ const b=(pl.match(/../g)||[]).map(h=>parseInt(h,16));
+ const dev=a=>!a||a[0]==='-'?'':a===self?'this board':(DEV[a.slice(0,2)]||'dev '+a.slice(0,2));
+ const to=dev(a1)&&a1!==a0?dev(a1):(dev(a2)&&a2!==a0?dev(a2):'');
+ const who=dev(a0)+(to?' → '+to:'');
+ const w16=i=>(b[i]<<8)|b[i+1],t16=i=>(w16(i)>=0x8000?w16(i)-0x10000:w16(i))/100;
+ const D={
+  '0001':()=>'RF check','0008':()=>'relay demand '+Math.round((b[1]||0)/2)+'%',
+  '042F':()=>'unit power-up','1060':()=>'battery '+(b[2]?'ok':'low'),
+  '10D0':()=>'filter '+(b[1]??'?')+'% left','10E0':()=>deviceInfo10E0(b),
+  '1298':()=>'CO₂ '+w16(1)+' ppm','12A0':()=>'humidity '+b[1]+'%',
+  '1FC9':()=>'bind / pairing','22F1':()=>'mode '+(MODE[b[1]]||'?'+b[1]),
+  '22F3':()=>'boost timer '+b[2]+' min',
+  '22F7':()=>'bypass '+({0:'close',200:'open',255:'auto'}[b[1]]??'?'+b[1]),
+  '2210':()=>'unit speed report? '+(b[5]==null?'?':b[5]/2+'%'),
+  '2309':()=>'setpoint '+t16(1)+'°C','2411':()=>'fan parameter',
+  '30C9':()=>'temperature '+t16(1)+'°C','31D9':()=>'fan mode '+(MODE[b[2]]||'?'+b[2]),
+  '31DA':()=>status31DA(b),'31E0':()=>'ventilation demand '+demand31E0(b),
+  '3EF0':()=>'actuator state'};
+ // An RQ carries only a placeholder byte, so name what is asked for instead of decoding it.
+ const NAME={'10D0':'filter','10E0':'device info','1298':'CO₂','12A0':'humidity',
+  '22F1':'mode','22F7':'bypass','2411':'fan parameter','31D9':'fan mode','31DA':'full status'};
+ const what=ty==='RQ'?(NAME[c]||'code '+c):D[c]?D[c]():'code '+c;
+ const verb=ty==='RQ'?'request ':ty==='W'?'set ':ty==='RP'?'reply ':'';
+ return who+': '+verb+what;
+}
+// Short device-type name for an id like 37:028129.
+function devType(id){return DEV[(id||'').slice(0,2)]||'dev '+(id||'').slice(0,2);}
+)JS";
+
 static const char LOG_HTML[] PROGMEM = R"LOG(<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -386,30 +478,34 @@ b{color:var(--fg)}
 
 <div class="card">
 <div class="small">This unit sends as <b id="usid">–</b> &nbsp; → &nbsp; fan <b id="fanid">–</b></div>
-<div id="seen" class="small" style="margin-top:8px"></div>
 <div class="row" style="margin-top:10px">
 <div><label>This device ID (cc:serial)</label><input id="us" placeholder="29:012345" style="width:150px"></div>
 <div><label>Fan ID (cc:serial)</label><input id="fan" placeholder="32:178990" style="width:150px"></div>
 <button class="go" id="apply" style="margin-top:18px">Apply &amp; save</button>
-<button id="clone" style="margin-top:18px">Use detected</button>
 </div>
 <div id="idmsg" class="small" style="margin-top:8px"></div>
-<p class="small">Cloning: press a button on your existing remote — its ID appears under "Detected".
-Put that as <b>This device ID</b> and your fan as <b>Fan ID</b>, Apply, and the fan obeys without pairing.</p>
+<p class="small">Cloning: press a button on your existing remote and find its frame in the log below
+(the strong <b>remote → fan</b> line). Put the remote's ID as <b>This device ID</b> and the fan's as
+<b>Fan ID</b>, Apply, and the fan obeys without pairing.</p>
 </div>
 
 <div class="card">
 <div class="row" style="justify-content:space-between">
 <div><span class="rx">■</span> received &nbsp; <span class="tx">■</span> sent</div>
-<label class="small"><input type="checkbox" id="auto" checked style="width:auto"> auto-refresh</label>
+<div class="row" style="align-items:center">
+<label class="small" style="margin:0">hide received weaker than −<input type="number" id="minr" placeholder="off" step="5" min="0" max="130" style="width:70px;padding:4px 6px"> dBm</label>
+<label class="small" style="margin:0"><input type="checkbox" id="auto" checked style="width:auto"> auto-refresh</label>
 </div>
+</div>
+<div id="hid" class="small" style="margin:6px 0"></div>
 <pre id="log">loading…</pre>
 </div>
 <p class="small"><a href="/" style="color:var(--acc)">&larr; back to controls</a></p>
 </div>
+<script src="/ramses.js"></script>
 <script>
 const $=s=>document.querySelector(s);
-let seenR='',seenF='',usId='';
+let usId='';
 function st(){fetch('/api/state').then(r=>r.json()).then(s=>{
   usId=s.us_id;
   $('#usid').textContent=s.us_id;$('#fanid').textContent=s.fan_id;
@@ -417,68 +513,19 @@ function st(){fetch('/api/state').then(r=>r.json()).then(s=>{
   if(!$('#fan').value&&s.fan_id&&!s.fan_id.startsWith('63'))$('#fan').value=s.fan_id;
 })}
 function fmtAge(t,now){let a=Math.max(0,(now-t)/1000);return a<99?a.toFixed(0)+'s':(a/60).toFixed(0)+'m'}
-// Human-readable meaning of a logged frame, e.g. "remote → fan: mode medium".
-const DEV={'01':'controller','04':'radiator valve','13':'relay','18':'gateway','29':'remote',
- '32':'fan','34':'thermostat','37':'15RF controller','63':'broadcast'};
-const MODE=['away','low','medium','high','auto','auto2','boost','disable'];
-// 31DA layout as in ramses_rf; 0xEF / 0x7FFF mean "not available".
-const FAN_INFO=i=>i===0?'off':i<=10?'speed '+i:i<=20?'speed '+(i-10)+' (override)':
- ({21:'away',22:'minimum',23:'maximum',24:'auto',25:'auto night'}[i]||'?'+i);
-function status31DA(b){
- if(b.length<21)return 'full status';
- const u8=i=>b[i]==null||b[i]===0xEF?null:b[i];
- const u16=i=>b[i+1]==null||((b[i]<<8)|b[i+1])===0x7FFF?null:(b[i]<<8)|b[i+1];
- const pct=i=>u8(i)==null?null:u8(i)/2+'%';
- const temp=i=>u16(i)==null?null:(u16(i)>=0x8000?u16(i)-0x10000:u16(i))/100+'°C';
- const f=[['fan',u8(18)==null?null:FAN_INFO(b[18]&0x1F)],
-  ['exhaust',pct(19)],['supply',pct(20)],['bypass',pct(17)],
-  ['RH in',u8(5)==null?null:b[5]+'%'],['RH out',u8(6)==null?null:b[6]+'%'],
-  ['CO₂',u16(3)==null?null:u16(3)+' ppm'],['air quality',pct(1)],
-  ['T exhaust',temp(7)],['T supply',temp(9)],['T indoor',temp(11)],['T outdoor',temp(13)],
-  ['timer',u16(21)?u16(21)+' min':null],['post-heat',pct(23)],['pre-heat',pct(24)]];
- return 'status '+f.filter(x=>x[1]!=null).map(x=>x[0]+' '+x[1]).join(', ');
-}
-// 10E0 layout as in ramses_rf: [14-17] date DD MM YYYY, [18..] model name.
-function deviceInfo10E0(b){
- const end=b.indexOf(0,18),name=String.fromCharCode(...b.slice(18,end<0?b.length:end));
- const made=b.length>17&&b[14]!==0xFF?b[14]+'-'+b[15]+'-'+((b[16]<<8)|b[17]):'';
- return 'device info '+[name,made&&'made '+made].filter(Boolean).join(', ');
-}
-function meaning(s){
- const p=s.trim().split(/\s+/);if(p.length<7)return '';
- const [ty,,a0,a1,a2,c]=p,pl=p[7]||'';
- const b=(pl.match(/../g)||[]).map(h=>parseInt(h,16));
- const dev=a=>!a||a[0]==='-'?'':a===usId?'this board':(DEV[a.slice(0,2)]||'dev '+a.slice(0,2));
- const to=dev(a1)&&a1!==a0?dev(a1):(dev(a2)&&a2!==a0?dev(a2):'');
- const who=dev(a0)+(to?' → '+to:'');
- const w16=i=>(b[i]<<8)|b[i+1],t16=i=>(w16(i)>=0x8000?w16(i)-0x10000:w16(i))/100;
- const D={
-  '0001':()=>'RF check','0008':()=>'relay demand '+Math.round((b[1]||0)/2)+'%',
-  '042F':()=>'unit power-up','1060':()=>'battery '+(b[2]?'ok':'low'),
-  '10D0':()=>'filter '+(b[1]??'?')+'% left','10E0':()=>deviceInfo10E0(b),
-  '1298':()=>'CO₂ '+w16(1)+' ppm','12A0':()=>'humidity '+b[1]+'%',
-  '1FC9':()=>'bind / pairing','22F1':()=>'mode '+(MODE[b[1]]||'?'+b[1]),
-  '22F3':()=>'boost timer '+b[2]+' min',
-  '22F7':()=>'bypass '+({0:'close',200:'open',255:'auto'}[b[1]]??'?'+b[1]),
-  '2309':()=>'setpoint '+t16(1)+'°C','2411':()=>'fan parameter',
-  '30C9':()=>'temperature '+t16(1)+'°C','31D9':()=>'fan mode '+(MODE[b[2]]||'?'+b[2]),
-  '31DA':()=>status31DA(b),'31E0':()=>'ventilation demand '+(b[6]??'?')+'%',
-  '3EF0':()=>'actuator state'};
- const what=D[c]?D[c]():'code '+c;
- const verb=ty==='RQ'?'request ':ty==='W'?'set ':ty==='RP'?'reply ':'';
- return who+': '+verb+what;
-}
 function load(){fetch('/api/log').then(r=>r.json()).then(j=>{
-  $('#seen').innerHTML='Detected: remote <b>'+(seenR||'-')+'</b>, fan <b>'+(seenF||'-')+'</b>';
   const now=Math.max(...j.log.map(e=>e.t),0);
-  $('#log').innerHTML=j.log.slice().reverse().map(e=>{
+  const minr=$('#minr').value===''?null:-Math.abs(+$('#minr').value);
+  const shown=j.log.filter(e=>minr===null||e.d!=='R'||e.r>=minr);
+  const hidden=j.log.length-shown.length;
+  $('#hid').textContent=hidden?hidden+' weaker frames hidden (likely neighbours)':'';
+  $('#log').innerHTML=shown.slice().reverse().map(e=>{
     const c=e.d==='R'?'rx':'tx';const r=e.d==='R'?(' '+e.r+'dBm'):'';
     return '<span class="'+c+'"><span class="tag">'+(e.d==='R'?'←':'→')+'</span>'+
            fmtAge(e.t,now).padStart(4)+r.padStart(7)+'  '+e.s+'</span>'+
-           '  <span class="mean">'+meaning(e.s)+'</span>';
+           '  <span class="mean">'+meaning(e.s,usId)+'</span>';
   }).join('\n')||'(nothing yet)';
 })}
-$('#clone').onclick=()=>{if(seenR)$('#us').value=seenR;if(seenF)$('#fan').value=seenF;};
 $('#apply').onclick=()=>{
   const pa=s=>{const m=(s||'').split(':');return m.length===2?[parseInt(m[0],10),parseInt(m[1],10)]:null};
   const u=pa($('#us').value),f=pa($('#fan').value);
@@ -488,6 +535,9 @@ $('#apply').onclick=()=>{
   fetch('/api/ids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
    .then(r=>r.json()).then(()=>{$('#idmsg').textContent='Saved. Now controlling as '+$('#us').value+'.';st();});
 };
+$('#minr').value='65';
+try{const v=localStorage.getItem('minRssi');if(v!==null)$('#minr').value=v.replace('-','');}catch(e){}
+$('#minr').oninput=()=>{try{localStorage.setItem('minRssi',$('#minr').value);}catch(e){}load();};
 st();load();setInterval(()=>{if($('#auto').checked)load();},1500);setInterval(st,4000);
 </script></body></html>)LOG";
 

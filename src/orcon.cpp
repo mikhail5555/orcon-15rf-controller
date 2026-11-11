@@ -2,6 +2,7 @@
 #include "orcon.h"
 #include "ramses_radio.h"
 #include "orcon_log.h"
+#include "peers.h"
 #include "config.h"
 #include <Arduino.h>
 #include <string.h>
@@ -17,7 +18,8 @@ static uint32_t g_lastFilter = 0;
 static uint32_t g_lastDemand = 0;
 static uint32_t g_lastInfo   = 0;
 static uint32_t g_lastStatus = 0;
-static bool     g_bootReq    = false;
+static uint32_t g_lastBootReq   = 0;
+static bool     g_bootFilterReq = false;
 
 static bool     g_selftest = false;
 static uint32_t g_stStart  = 0;
@@ -211,12 +213,28 @@ void tick(uint32_t now) {
         }
         return;
     }
-    if (!g_bootReq && now > 8000)                      { g_bootReq = true; requestStatus(); requestFilter(); }  // populate after reboot
+    // Populate after reboot: ask for status until the first 31DA arrives, and
+    // the filter a few seconds later so its reply can't collide with the status one.
+    if (now > 8000 && !g_state.raw31DAms && now - g_lastBootReq >= 10000) { g_lastBootReq = now; requestStatus(); }
+    if (!g_bootFilterReq && now > 12000)               { g_bootFilterReq = true; requestFilter(); }
     if (now - g_lastStatus >= SEND_STATUS_INTERVAL_MS) { g_lastStatus = now; requestStatus(); }  // keep live values fresh
     if (now - g_lastFilter >= 600000UL)                { g_lastFilter = now; requestFilter(); }  // poll 10D0 filter status every 10 min
     if (now - g_lastDemand >= SEND_DEMAND_INTERVAL_MS) { g_lastDemand = now; sendDemand(g_state.demand); }
     if (now - g_lastCo2 >= SEND_CO2_INTERVAL_MS)       { g_lastCo2 = now; if (g_state.co2) sendCo2(g_state.co2); }
     if (now - g_lastInfo >= SEND_DEVINFO_INTERVAL_MS)  { g_lastInfo = now; sendDeviceInfo(); }
+}
+
+// 31DA byte 18 "fan info" (ramses_rf): 1-3 = speed 1-3, 21 = away, 24/25 = auto.
+// Lets a status reply fill the mode right after boot, before any 31D9.
+static Mode modeFromFanInfo(uint8_t info) {
+    switch (info & 0x1F) {
+        case 1:  return Mode::Low;
+        case 2:  return Mode::Medium;
+        case 3:  return Mode::High;
+        case 21: return Mode::Away;
+        case 24: case 25: return Mode::Auto;
+        default: return Mode::Unknown;
+    }
 }
 
 static void setTemp(float& dst, const uint8_t* p) {
@@ -261,6 +279,7 @@ bool onFrame(const ramses::Frame& f) {
     rlog::add('R', f, (int)radio::lastRssi());
     g_state.rxCount++;
     fmtFrame(f, g_state.lastRx, sizeof(g_state.lastRx));
+    if (g_state.fanKnown) peers::observe(f, g_ids.fan, (int)radio::lastRssi(), millis());
     if (isRetransmission(f)) return false;
 
     for (int i = 0; i < 3; i++)
@@ -304,6 +323,7 @@ bool onFrame(const ramses::Frame& f) {
             if (f.len >= 18 && p[17] != 0xEF && p[17] != 0xFF) g_state.bypassOpen = p[17] != 0x00;
             if (f.len >= 20) g_state.exhaustPct  = (p[19] <= 200) ? p[19] / 2 : g_state.exhaustPct;
             if (f.len >= 21) g_state.supplyPct   = (p[20] <= 200) ? p[20] / 2 : g_state.supplyPct;
+            if (f.len >= 19) { Mode m = modeFromFanInfo(p[18]); if (m != Mode::Unknown) g_state.mode = m; }
             changed = true; break;
         case 0x31E0: if (f.len >= 7) { g_state.demand = p[6] > 100 ? 100 : p[6]; changed = true; } break;
         case 0x12A0:

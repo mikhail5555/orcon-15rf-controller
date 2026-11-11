@@ -26,7 +26,10 @@
 #define RF_BITRATE_KBPS    38.4f
 #define RF_DEVIATION_KHZ   50.78f
 #if defined(RADIO_SX1276)
-#define RF_RXBW_KHZ        250.0f      // SX1276 max RxBw — wide enough for RAMSES
+#define RF_RXBW_KHZ        167.0f      // single-sided: RAMSES needs ~70k (50.8k dev + 19.2k
+                                       // half-bitrate) + crystal-offset margin. Interleaved A/B
+                                       // vs 250k: +23% decoded frames, no device lost (125k is
+                                       // similar but leaves less offset margin).
 #else
 #define RF_RXBW_KHZ        312.0f      // nearest SX1262-valid step to the protocol's 325k
                                        // (CC1101 path maps this to ~325k automatically)
